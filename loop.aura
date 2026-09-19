@@ -83,6 +83,8 @@
 (define *yield-ok* #f)
 (define *found* '())
 (define *did-backoff* #f)
+(define *stats-len* 0)
+(define *src* "")
 
 (set! *env-p* (try (getenv "STRAND_PROPOSE") (catch (e) "")))
 (if (and (string? *env-p*) (> (string-length *env-p*) 0))
@@ -117,10 +119,13 @@
 (try (hot-strategy:register! "f" *b0*) (catch (e) #f))
 (set! *best* (live-fit))
 (set! *final* *best*)
+(set! *src* (try (current-source :workspace) (catch (e) "")))
 (display "seeded f = identity  fitness=")
 (display *best*)
 (display "/")
 (display *case-n*)
+(display " source=")
+(display *src*)
 (newline)
 
 ; ── drive: named let (not a workspace define). ──
@@ -361,6 +366,7 @@
                *load-restored*)
         (set! *pass-strong* #t)
         #f)
+      (set! *stats-len* (try (hash-length (agent:loop-stats)) (catch (e) -1)))
       (loop (+ n 1)))))
 
 (display "---")
@@ -400,7 +406,9 @@
 (display *stop-reason*)
 (newline)
 
-(display "agent:loop-stats ")
+(display "agent:loop-stats len=")
+(display *stats-len*)
+(display " ")
 (display (try (agent:loop-stats) (catch (e) "n/a")))
 (newline)
 (display "mutate:summary ")
