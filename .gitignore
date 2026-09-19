@@ -1,0 +1,5 @@
+build/
+.strand/
+*.aura-soul
+*.log
+.DS_Store

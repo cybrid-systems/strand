@@ -1,0 +1,392 @@
+; loop.aura — Strand closed loop (single file)
+;
+; Workspace function f starts as identity.
+; Fitness = how many fixed abs-cases f already satisfies.
+; Each round: query f → propose body → mutate:rebind → agent:decide
+;   commit   → persist:save
+;   rollback → ast:restore + hot-strategy:heal!
+;   back-off → mutate:safe-yield and skip
+; Prints agent:loop-stats and mutate:summary at the end.
+;
+; Run: ./scripts/run.sh
+; Env: STRAND_PROPOSE=catalog|swarm|llm   STRAND_SOUL=path
+
+(require "std/agent" all:)
+(require "std/mutate" all:)
+(require "std/persist" all:)
+(require "std/hot-strategy" all:)
+(require "std/swarm" all:)
+(require "std/llm" all:)
+(require "std/query" all:)
+(require "std/string" all:)
+
+(display "=== Strand: fitness / propose / decide / persist ===")
+(newline)
+
+; ── cases: evolve identity → abs ──────────────────
+(define *cases*
+  (list (list -4 4)
+        (list -1 1)
+        (list 0 0)
+        (list 2 2)
+        (list 7 7)))
+
+(define *case-n* 5)
+
+; Offline body catalog. Index 2 is the goal (abs).
+(define *bodies*
+  (list "(lambda (x) x)"
+        "(lambda (x) (* x -1))"
+        "(lambda (x) (if (< x 0) (* x -1) x))"
+        "(lambda (x) 0)"
+        "(lambda (x) (* x 2))"))
+
+(define *body-n* 5)
+
+; Local twins of the catalog, used by swarm fitness without mutating f.
+(define (cand-id x) x)
+(define (cand-neg x) (* x -1))
+(define (cand-abs x) (if (< x 0) (* x -1) x))
+(define (cand-zero x) 0)
+(define (cand-dbl x) (* x 2))
+
+(define (cand-at i)
+  (cond
+    ((= i 0) cand-id)
+    ((= i 1) cand-neg)
+    ((= i 2) cand-abs)
+    ((= i 3) cand-zero)
+    (else cand-dbl)))
+
+(define (body-at i)
+  (cond
+    ((= i 0) "(lambda (x) x)")
+    ((= i 1) "(lambda (x) (* x -1))")
+    ((= i 2) "(lambda (x) (if (< x 0) (* x -1) x))")
+    ((= i 3) "(lambda (x) 0)")
+    (else "(lambda (x) (* x 2))")))
+
+(define (clamp-idx n)
+  (if (< n 0) 0
+    (if (>= n *body-n*) (- *body-n* 1) n)))
+
+; ── env / counters ────────────────────────
+(define *propose-mode*
+  (let ((e (getenv "STRAND_PROPOSE")))
+    (if (and (string? e) (> (string-length e) 0)) e "catalog")))
+
+(define *soul*
+  (let ((e (getenv "STRAND_SOUL")))
+    (if (and (string? e) (> (string-length e) 0))
+      e
+      ".strand/session.aura-soul")))
+
+(define *rounds* 6)
+(define *best* 0)
+(define *best-body* "(lambda (x) x)")
+(define *catalog-i* 0)
+(define *skip-left* 0)
+(define *commits* 0)
+(define *rollbacks* 0)
+(define *backoffs* 0)
+(define *escalations* 0)
+(define *persists* 0)
+(define *stopped* #f)
+(define *stop-reason* "")
+(define *last-decision* 'none)
+
+(define (strand-num v d)
+  (if (number? v) v d))
+
+; ── fitness against *cases* using live f ──────────
+(define (score-fn fn)
+  (let loop ((xs *cases*) (n 0))
+    (if (null? xs)
+      n
+      (let* ((c (car xs))
+             (x (car c))
+             (want (car (cdr c)))
+             (got (try (fn x) (catch (e) 99999))))
+        (loop (cdr xs)
+              (if (and (number? got) (= got want)) (+ n 1) n))))))
+
+(define (fitness)
+  (try (score-fn f) (catch (e) 0)))
+
+; ── seed workspace ────────────────────────
+(define *seed-src* "(define (f x) x)")
+(define *seeded*
+  (try
+    (begin
+      (set-code *seed-src*)
+      (eval-current)
+      #t)
+    (catch (e) #f)))
+
+(if *seeded*
+  (begin
+    (try (hot-strategy:register! "f" "(lambda (x) x)") (catch (e) #f))
+    (set! *best* (fitness))
+    (display "seeded f = identity  fitness=")
+    (display *best*)
+    (display "/")
+    (display *case-n*)
+    (newline))
+  (begin
+    (display "FAIL: could not seed workspace f")
+    (newline)))
+
+; ── observe ────────────────────────────
+(define (observe-f)
+  (try
+    (begin
+      (query :find "f")
+      (query :def-use "f")
+      #t)
+    (catch (e) #f)))
+
+; ── propose ────────────────────────────
+; catalog: walk the body list, injecting a poison body on round 3.
+; swarm:  one grid step over catalog index; fitness is score-fn of twins.
+; llm:    ask for a lambda; fall back to catalog on empty/blocked.
+
+(define (propose-catalog round)
+  (if (= round 3)
+    "(lambda (x) 99)"
+    (begin
+      (set! *catalog-i* (clamp-idx *catalog-i*))
+      (let ((b (body-at *catalog-i*)))
+        (set! *catalog-i* (+ *catalog-i* 1))
+        b))))
+
+(define (propose-swarm)
+  (try
+    (begin
+      (swarm:init (hash "kind" "grid"
+                        "dim" 1
+                        "pop" 5
+                        "bins" 5
+                        "bounds" (list (list 0.0 4.9))))
+      (swarm:step!
+        (lambda (ind)
+          (let* ((raw (if (pair? ind) (car ind) ind))
+                 (i (clamp-idx (if (number? raw) (floor raw) 0))))
+            ; higher better — score-fn of the catalog twin
+            (score-fn (cand-at i)))))
+      (let* ((best (swarm:best))
+             (raw (if (pair? best) (car best) best))
+             (i (clamp-idx (if (number? raw) (floor raw) 0))))
+        (body-at i)))
+    (catch (e) (propose-catalog 0))))
+
+(define (propose-llm)
+  (try
+    (let* ((prompt
+             "Return ONLY one Aura lambda that computes abs: (lambda (x) ...). No markdown.")
+           (resp (llm-ask prompt))
+           (code (extract-code resp)))
+      (if (and (string? code) (> (string-length code) 10))
+        code
+        (propose-catalog 0)))
+    (catch (e) (propose-catalog 0))))
+
+(define (propose-body round)
+  (cond
+    ((string=? *propose-mode* "llm") (propose-llm))
+    ((string=? *propose-mode* "swarm") (propose-swarm))
+    (else (propose-catalog round))))
+
+; ── one round ──────────────────────────
+(define (alist-get key lst default)
+  (if (null? lst)
+    default
+    (if (equal? (car (car lst)) key)
+      (cdr (car lst))
+      (alist-get key (cdr lst) default))))
+
+(define (do-rollback snap)
+  (set! *rollbacks* (+ *rollbacks* 1))
+  (if (and (number? snap) (>= snap 0))
+    (try (ast:restore snap) (catch (e) (hot-strategy:heal!)))
+    (try (hot-strategy:heal!) (catch (e) #f)))
+  (try (eval-current) (catch (e) #f))
+  'rollback)
+
+(define (do-persist)
+  (let ((ok (try (persist:save *soul*) (catch (e) #f))))
+    (if ok (set! *persists* (+ *persists* 1)) #f)
+    ok))
+
+(define (round-once n)
+  (display "R")
+  (display n)
+  (display " observe fitness=")
+  (display (fitness))
+  (display " skip-left=")
+  (display *skip-left*)
+  (newline)
+  (observe-f)
+  (try (mutate:safe-yield) (catch (e) #f))
+
+  (if (> *skip-left* 0)
+    (begin
+      (set! *skip-left* (- *skip-left* 1))
+      (set! *last-decision* 'skip)
+      (display "  skip (back-off cooldown)")
+      (newline)
+      'skip)
+    (let ((gate (try (agent:decide) (catch (e) 'commit))))
+      (cond
+        ((eq? gate 'escalate)
+         (set! *escalations* (+ *escalations* 1))
+         (set! *stopped* #t)
+         (set! *stop-reason* "escalate")
+         (set! *last-decision* 'escalate)
+         (display "  escalate — stop")
+         (newline)
+         'escalate)
+        ((eq? gate 'back-off)
+         (set! *backoffs* (+ *backoffs* 1))
+         (set! *skip-left* 1)
+         (set! *last-decision* 'back-off)
+         (try (mutate:safe-yield) (catch (e) #f))
+         (display "  back-off — yield, cooldown 1")
+         (newline)
+         'back-off)
+        (else
+         (let* ((body (propose-body n))
+                (snap (try (ast:snapshot (string-append "r" (number->string n)))
+                           (catch (e) -1)))
+                (pre (fitness))
+                (loop-r
+                  (try
+                    (agent:closed-loop-once
+                      :skip-set-code
+                      :rebind "f" body
+                      :summary (string-append "strand-r" (number->string n)))
+                    (catch (e) (list (cons ":ok" #f)
+                                     (cons ":decision" 'rollback))))))
+           (display "  propose ")
+           (display body)
+           (newline)
+           (let* ((dec (alist-get ":decision" loop-r 'rollback))
+                  (ok (alist-get ":ok" loop-r #f))
+                  (post (fitness)))
+             (display "  closed-loop decision=")
+             (display dec)
+             (display " ok=")
+             (display ok)
+             (display " fitness ")
+             (display pre)
+             (display "→")
+             (display post)
+             (newline)
+             (cond
+               ((eq? dec 'escalate)
+                (set! *escalations* (+ *escalations* 1))
+                (set! *stopped* #t)
+                (set! *stop-reason* "escalate")
+                (set! *last-decision* 'escalate)
+                (do-rollback snap)
+                'escalate)
+               ((eq? dec 'back-off)
+                (set! *backoffs* (+ *backoffs* 1))
+                (set! *skip-left* 1)
+                (set! *last-decision* 'back-off)
+                (do-rollback snap)
+                (try (mutate:safe-yield) (catch (e) #f))
+                'back-off)
+               ((or (not ok) (eq? dec 'rollback) (< post pre))
+                (set! *last-decision* (do-rollback snap))
+                (display "  rollback fitness now=")
+                (display (fitness))
+                (newline)
+                'rollback)
+               (else
+                (set! *commits* (+ *commits* 1))
+                (set! *last-decision* 'commit)
+                (if (> post *best*)
+                  (begin
+                    (set! *best* post)
+                    (set! *best-body* body)
+                    (try (hot-strategy:register! "f" body) (catch (e) #f))
+                    (display "  persist ")
+                    (display *soul*)
+                    (display " ")
+                    (display (do-persist))
+                    (newline))
+                  (display "  commit (no fitness gain, skip persist)")
+                  (newline))
+                'commit)))))))))
+
+; ── drive ─────────────────────────────
+(if *seeded*
+  (let loop ((n 1))
+    (if (or *stopped* (> n *rounds*))
+      #t
+      (begin
+        (round-once n)
+        (loop (+ n 1)))))
+  #f)
+
+(display "---")
+(newline)
+(display "best fitness=")
+(display *best*)
+(display "/")
+(display *case-n*)
+(display " body=")
+(display *best-body*)
+(newline)
+(display "live fitness=")
+(display (fitness))
+(newline)
+(display "commits=")
+(display *commits*)
+(display " rollbacks=")
+(display *rollbacks*)
+(display " backoffs=")
+(display *backoffs*)
+(display " escalations=")
+(display *escalations*)
+(display " persists=")
+(display *persists*)
+(newline)
+(display "last=")
+(display *last-decision*)
+(display " stopped=")
+(display *stopped*)
+(display " reason=")
+(display *stop-reason*)
+(newline)
+
+(display "agent:loop-stats ")
+(write (try (agent:loop-stats) (catch (e) (hash))))
+(newline)
+(display "mutate:summary ")
+(write (try (mutate:summary) (catch (e) (list))))
+(newline)
+(display "mutate:last-info ")
+(write (try (mutate:last-info) (catch (e) (list))))
+(newline)
+
+; Four seed criteria. Poison on catalog R3 must not stick.
+(define *final* (fitness))
+(define *ok*
+  (and *seeded*
+       (>= *rollbacks* 1)
+       (>= *commits* 1)
+       (>= *final* *best*)
+       (>= *final* 3)))
+
+(if *ok*
+  (begin
+    (display "PASS: strand closed loop (commit + rollback + stats)")
+    (newline)
+    (display "RESULT pass repo=strand")
+    (newline))
+  (begin
+    (display "FAIL: seed criteria not met (need ≥1 commit, ≥1 rollback, live fitness ≥ 3)")
+    (newline)
+    (display "RESULT fail repo=strand")
+    (newline)))
