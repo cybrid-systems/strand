@@ -8,9 +8,8 @@
 ;   back-off → first commit arms skip-left; next round yields and does not mutate
 ; Prints agent:loop-stats and mutate:summary at the end.
 ;
-; Host constraint: set-code / eval-current rebuild the workspace env.
-; Do not (define x <expr-that-evals-current>). Drive the loop from a
-; top-level named let + predeclared cells; workspace closures die.
+; Aura #3915 (9ab8dcb56): eval-current keeps the stdin env.
+; #3927: < / = / - on set! cells may const-fold to init — compare via a pair.
 ;
 ; Run: ./scripts/run.sh
 ; Env: STRAND_PROPOSE=catalog|swarm|llm   STRAND_SOUL=path
@@ -87,6 +86,7 @@
 (define *stats-len* 0)
 (define *src* "")
 (define *cut* 0)
+(define *sc* (cons 0 0))
 
 (set! *env-p* (try (getenv "STRAND_PROPOSE") (catch (e) "")))
 (if (and (string? *env-p*) (> (string-length *env-p*) 0))
@@ -98,10 +98,14 @@
   (set! *soul* *env-s*)
   #f)
 
-; ── seed workspace: only f. Must be top-level, not inside define. ──
-(set-code "(define (f x) x)")
-(eval-current)
-(set! *seeded* #t)
+; ── seed (#3915: define-RHS of eval-current binds) ──
+(set! *seeded*
+  (try
+    (begin
+      (set-code "(define (f x) x)")
+      (eval-current)
+      #t)
+    (catch (e) #f)))
 
 ; live-fit: score live f against the five abs cases. No inner let.
 (define (live-fit)
@@ -118,6 +122,14 @@
   (if (and (number? *got*) (= *got* 7)) (set! *nfit* (+ *nfit* 1)) #f)
   *nfit*)
 
+(define (rebind-f body summary)
+  (try
+    (agent:closed-loop-once
+      :skip-set-code
+      :rebind "f" body
+      :summary summary)
+    (catch (e) (list (cons ":ok" #f) (cons ":decision" 'rollback)))))
+
 (try (hot-strategy:register! "f" *b0*) (catch (e) #f))
 (set! *best* (live-fit))
 (set! *final* *best*)
@@ -130,8 +142,7 @@
 (display *src*)
 (newline)
 
-; ── drive: named let (not a workspace define). ──
-; closed-loop-once / eval-current run here via set! of predeclared cells.
+; ── drive ──
 (let loop ((n 1))
   (if (or *stopped* (> n *rounds*))
     #t
@@ -255,15 +266,10 @@
                 (if (= n 3) (set! *body* *poison*) #f)
 
                 (set! *snap* (try (ast:snapshot "r") (catch (e) -1)))
-                (set! *pre* (live-fit))
+                (set-car! *sc* (live-fit))
+                (set! *pre* (car *sc*))
                 (set! *loop-r*
-                  (try
-                    (agent:closed-loop-once
-                      :skip-set-code
-                      :rebind "f" *body*
-                      :summary (string-append "strand-r" (number->string n)))
-                    (catch (e) (list (cons ":ok" #f)
-                                     (cons ":decision" 'rollback)))))
+                  (rebind-f *body* (string-append "strand-r" (number->string n))))
                 (set! *dec* 'rollback)
                 (set! *okv* #f)
                 (if (and (pair? *loop-r*) (pair? (car *loop-r*)))
@@ -277,7 +283,8 @@
                         #f)
                       #f))
                   #f)
-                (set! *post* (live-fit))
+                (set-cdr! *sc* (live-fit))
+                (set! *post* (cdr *sc*))
                 (display "  propose ")
                 (display *body*)
                 (if (string=? *propose-mode* "llm")
@@ -312,7 +319,7 @@
                       (try (hot-strategy:heal!) (catch (e) #f))
                       (try (eval-current) (catch (e) #f))
                       (try (mutate:safe-yield) (catch (e) #f)))
-                    (if (or (not *okv*) (eq? *dec* 'rollback) (< *post* *pre*))
+                    (if (or (not *okv*) (eq? *dec* 'rollback) (< (cdr *sc*) (car *sc*)))
                       (begin
                         (set! *rollbacks* (+ *rollbacks* 1))
                         (set! *last-decision* "rollback")
@@ -350,11 +357,7 @@
                             (display *persist-ok*)
                             (newline)
                             (set! *saved-fit* *post*)
-                            (try
-                              (agent:closed-loop-once
-                                :skip-set-code
-                                :rebind "f" *poison*
-                                :summary "durability-poison")
+                            (try (rebind-f *poison* "durability-poison")
                               (catch (e) #f))
                             (set! *poison-fit* (live-fit))
                             (set! *load-called* (try (persist:load *soul*) (catch (e) #f)))
@@ -432,18 +435,26 @@
 (display "agent:loop-stats len=")
 (display *stats-len*)
 (display " ")
-(display (try (agent:loop-stats) (catch (e) "n/a")))
+(write (try (agent:loop-stats) (catch (e) "n/a")))
 (newline)
 (display "mutate:summary ")
-(display (try (mutate:summary) (catch (e) "n/a")))
+(write (try (mutate:summary) (catch (e) "n/a")))
 (newline)
 (display "mutate:last-info ")
-(display (try (mutate:last-info) (catch (e) "n/a")))
+(write (try (mutate:last-info) (catch (e) "n/a")))
 (newline)
 
-; Four seed criteria. Poison on catalog R3 must not stick.
-; *pass* is folded each round — tail must not call >= / write
-; (eval-current can drop those bindings).
+; #3915-C: >= / write still live at the tail.
+(if (and *seeded*
+         (>= *commits* 1)
+         (>= *rollbacks* 1)
+         (>= *final* *best*)
+         (>= *final* 3))
+  (set! *pass* #t)
+  (set! *pass* #f))
+(if (and *pass* *query-ok* (>= *backoffs* 1) *load-restored*)
+  (set! *pass-strong* #t)
+  #f)
 (if *pass*
   (begin
     (display "PASS: strand closed loop (commit + rollback + stats)")
