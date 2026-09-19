@@ -21,9 +21,10 @@ Default target: evolve `f` from identity to `abs` against a fixed case table. De
 ## Success criteria (what this repo is for)
 
 1. A bad body never stays — snapshot / heal restores `f`.
-2. `agent:decide` of `back-off` / `escalate` stops mutating instead of spinning.
-3. A fitness improvement is durable via `persist:save`.
-4. End of run prints `agent:loop-stats` and `mutate:summary`.
+2. `back-off` skips a mutate (first commit arms a yield round even if `agent:decide` stays `commit`).
+3. A fitness improvement is durable via `persist:save`, then poison + `persist:load`.
+4. `query :find` on live `f` returns a handle.
+5. End of run prints `agent:loop-stats` and `mutate:summary`.
 
 These four are assumptions to measure, not guarantees. Host residuals that still matter: Aura `#3905` (orch Fiber vs AgentHandle) if you later add long-lived spawn; this seed stays single-threaded.
 
@@ -49,7 +50,7 @@ export LLM_MODEL=deepseek-chat
 STRAND_PROPOSE=llm ./scripts/run.sh
 ```
 
-PASS (printed at the end of `loop.aura`): at least 1 commit, 1 rollback, and live `f` fitness ≥ 3. That is a host measurement, not a guarantee.
+PASS (printed at the end of `loop.aura`): at least 1 commit, 1 rollback, and live `f` fitness ≥ 3. Extra line records query / back-off / `persist:load` (those can residual without failing the base PASS). That is a host measurement, not a guarantee.
 
 Soul file lands at `.strand/session.aura-soul` (gitignored).
 

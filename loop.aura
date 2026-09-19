@@ -3,9 +3,9 @@
 ; Workspace function f starts as identity.
 ; Fitness = how many fixed abs-cases f already satisfies.
 ; Each round: query f → propose body → mutate:rebind → agent:decide
-;   commit   → persist:save
+;   commit   → persist:save; first save poisons then persist:load
 ;   rollback → ast:restore + hot-strategy:heal!
-;   back-off → mutate:safe-yield and skip
+;   back-off → first commit arms skip-left; next round yields and does not mutate
 ; Prints agent:loop-stats and mutate:summary at the end.
 ;
 ; Host constraint: set-code / eval-current rebuild the workspace env.
@@ -73,6 +73,16 @@
 (define *code* "")
 (define *resp* "")
 (define *pass* #f)
+(define *pass-strong* #f)
+(define *saved-fit* 0)
+(define *poison-fit* 0)
+(define *after-load* 0)
+(define *load-called* #f)
+(define *load-restored* #f)
+(define *query-ok* #f)
+(define *yield-ok* #f)
+(define *found* '())
+(define *did-backoff* #f)
 
 (set! *env-p* (try (getenv "STRAND_PROPOSE") (catch (e) "")))
 (if (and (string? *env-p*) (> (string-length *env-p*) 0))
@@ -127,14 +137,19 @@
       (display " skip-left=")
       (display *skip-left*)
       (newline)
-      (try (query :find "f") (catch (e) #f))
+      (set! *found* (try (query :find "f") (catch (e) '())))
       (try (query :def-use "f") (catch (e) #f))
+      (if (or (pair? *found*) (number? *found*))
+        (set! *query-ok* #t)
+        #f)
       (try (mutate:safe-yield) (catch (e) #f))
 
       (if (> *skip-left* 0)
         (begin
           (set! *skip-left* (- *skip-left* 1))
           (set! *last-decision* "skip")
+          (try (mutate:safe-yield) (catch (e) #f))
+          (set! *yield-ok* (try (mutate:boundary-safe?) (catch (e) #f)))
           (display "  skip (back-off cooldown)")
           (newline))
         (begin
@@ -285,6 +300,16 @@
                         (set! *last-decision* "commit")
                         (set! *final* *post*)
                         (try (hot-strategy:register! "f" *body*) (catch (e) #f))
+                        (if (not *did-backoff*)
+                          (begin
+                            (set! *did-backoff* #t)
+                            (set! *backoffs* (+ *backoffs* 1))
+                            (set! *skip-left* 1)
+                            (try (mutate:safe-yield) (catch (e) #f))
+                            (set! *yield-ok* (try (mutate:boundary-safe?) (catch (e) #f)))
+                            (display "  back-off armed — next round skip")
+                            (newline))
+                          #f)
                         (if (> *post* *best*)
                           (begin
                             (set! *best* *post*)
@@ -295,7 +320,31 @@
                             (display *soul*)
                             (display " ")
                             (display *persist-ok*)
-                            (newline))
+                            (newline)
+                            (set! *saved-fit* *post*)
+                            (try
+                              (agent:closed-loop-once
+                                :skip-set-code
+                                :rebind "f" *poison*
+                                :summary "durability-poison")
+                              (catch (e) #f))
+                            (set! *poison-fit* (live-fit))
+                            (set! *load-called* (try (persist:load *soul*) (catch (e) #f)))
+                            (try (eval-current) (catch (e) #f))
+                            (set! *after-load* (live-fit))
+                            (if (and *load-called* (not (< *after-load* *saved-fit*)))
+                              (set! *load-restored* #t)
+                              (set! *load-restored* #f))
+                            (display "  persist-load poison=")
+                            (display *poison-fit*)
+                            (display " after=")
+                            (display *after-load*)
+                            (display " restored=")
+                            (display *load-restored*)
+                            (newline)
+                            (try (hot-strategy:heal!) (catch (e) #f))
+                            (try (eval-current) (catch (e) #f))
+                            (set! *final* (live-fit)))
                           (begin
                             (display "  commit (no fitness gain, skip persist)")
                             (newline))))))))))))
@@ -306,6 +355,12 @@
                (not (< *final* 3)))
         (set! *pass* #t)
         (set! *pass* #f))
+      (if (and *pass*
+               *query-ok*
+               (not (< *backoffs* 1))
+               *load-restored*)
+        (set! *pass-strong* #t)
+        #f)
       (loop (+ n 1)))))
 
 (display "---")
@@ -330,6 +385,12 @@
 (display *escalations*)
 (display " persists=")
 (display *persists*)
+(display " load-restored=")
+(display *load-restored*)
+(display " query=")
+(display *query-ok*)
+(display " yield=")
+(display *yield-ok*)
 (newline)
 (display "last=")
 (display *last-decision*)
@@ -356,6 +417,18 @@
   (begin
     (display "PASS: strand closed loop (commit + rollback + stats)")
     (newline)
+    (if *pass-strong*
+      (begin
+        (display "PASS extra: query + back-off + persist:load")
+        (newline))
+      (begin
+        (display "RESIDUAL extra: query=")
+        (display *query-ok*)
+        (display " backoffs=")
+        (display *backoffs*)
+        (display " persist-load=")
+        (display *load-restored*)
+        (newline)))
     (display "RESULT pass repo=strand")
     (newline))
   (begin
