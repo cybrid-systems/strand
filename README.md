@@ -26,7 +26,7 @@ Default target: evolve `f` from identity to `abs` against a fixed case table. De
 4. `query :find` on live `f` returns a handle.
 5. End of run prints `agent:loop-stats` and `mutate:summary`.
 
-These four are assumptions to measure, not guarantees. Host residuals that still matter: Aura `#3905` (orch Fiber vs AgentHandle) if you later add long-lived spawn; this seed stays single-threaded.
+These are assumptions to measure, not guarantees. Host residuals that still matter: Aura `#3905` (orch Fiber vs AgentHandle) if you later add long-lived spawn; this seed stays single-threaded.
 
 ## Run
 
