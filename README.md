@@ -7,7 +7,7 @@ One Aura closed-loop **application seed** — not a Unify denseness span.
 ```
 workspace f
   → query f
-  → swarm or LLM propose a body
+  → catalog / swarm / LLM propose a body
   → mutate:rebind
   → agent:decide
        commit   → persist:save
@@ -16,7 +16,7 @@ workspace f
   → print agent:loop-stats + mutation-log
 ```
 
-Default target: evolve `f` from identity to `abs` against a fixed case table. Offline catalog + `std/swarm` is the default proposer. Live LLM is opt-in (`LLM_API_KEY`).
+Default target: evolve `f` from identity to `abs` against a fixed case table. Default proposer is the offline catalog (round 3 injects poison `(lambda (x) 99)` to force a rollback). `STRAND_PROPOSE=swarm` searches that catalog with `std/swarm`. `STRAND_PROPOSE=llm` is the only path that calls `llm-ask`.
 
 ## Success criteria (what this repo is for)
 
@@ -29,7 +29,7 @@ These four are assumptions to measure, not guarantees. Host residuals that still
 
 ## Run
 
-Needs a built Aura host (same convention as Aether):
+Needs a built Aura host (same convention as Aether). `scripts/run.sh` looks for `../aura-grok`, then `../aura`. Sandbox is off by default (same as the Aether CLI demos); otherwise `mutate` is denied by the effect gate.
 
 ```bash
 # default: ../aura-grok/build/aura  and  ../aura-grok/lib
@@ -38,14 +38,18 @@ Needs a built Aura host (same convention as Aether):
 AURA_BIN=/path/to/aura AURA_LIB=/path/to/aura/lib ./scripts/run.sh
 ```
 
-Optional live propose:
+Optional proposers:
 
 ```bash
+STRAND_PROPOSE=swarm ./scripts/run.sh
+
 export LLM_API_KEY=...
 export LLM_BASE_URL=https://api.deepseek.com/v1   # or MiniMax
 export LLM_MODEL=deepseek-chat
 STRAND_PROPOSE=llm ./scripts/run.sh
 ```
+
+PASS (printed at the end of `loop.aura`): at least 1 commit, 1 rollback, and live `f` fitness ≥ 3. That is a host measurement, not a guarantee.
 
 Soul file lands at `.strand/session.aura-soul` (gitignored).
 
