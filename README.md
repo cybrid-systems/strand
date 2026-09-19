@@ -44,8 +44,11 @@ Optional proposers:
 ```bash
 STRAND_PROPOSE=swarm ./scripts/run.sh
 
+# MiniMax-M3: run.sh reads ~/code/keys/minimax when LLM_API_KEY is unset
+STRAND_PROPOSE=llm ./scripts/run.sh
+
 export LLM_API_KEY=...
-export LLM_BASE_URL=https://api.deepseek.com/v1   # or MiniMax
+export LLM_BASE_URL=https://api.deepseek.com/v1
 export LLM_MODEL=deepseek-chat
 STRAND_PROPOSE=llm ./scripts/run.sh
 ```

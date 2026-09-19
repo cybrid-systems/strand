@@ -86,5 +86,5 @@ if [[ -z "${LLM_API_KEY:-}" && -f "$_KEY_FILE" ]]; then
 fi
 unset _KEY_FILE
 
-echo "strand: bin=$BIN lib=$LIB propose=${STRAND_PROPOSE} soul=${STRAND_SOUL}"
+echo "strand: bin=$BIN lib=$LIB propose=${STRAND_PROPOSE} soul=${STRAND_SOUL} model=${LLM_MODEL:-} base=${LLM_BASE_URL:-}"
 exec "$BIN" < "$SRC"
