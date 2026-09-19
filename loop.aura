@@ -8,8 +8,8 @@
 ;   back-off → first commit arms skip-left; next round yields and does not mutate
 ; Prints agent:loop-stats and mutate:summary at the end.
 ;
-; Aura #3915 (9ab8dcb56): eval-current keeps the stdin env.
-; #3927: < / = / - on set! cells may const-fold to init — compare via a pair.
+; Aura #3915: eval-current keeps the stdin env.
+; Aura #3927 (dd2bd1fcb): set! cells are visible to < / = / -.
 ;
 ; Run: ./scripts/run.sh
 ; Env: STRAND_PROPOSE=catalog|swarm|llm   STRAND_SOUL=path
@@ -86,7 +86,6 @@
 (define *stats-len* 0)
 (define *src* "")
 (define *cut* 0)
-(define *sc* (cons 0 0))
 
 (set! *env-p* (try (getenv "STRAND_PROPOSE") (catch (e) "")))
 (if (and (string? *env-p*) (> (string-length *env-p*) 0))
@@ -198,20 +197,8 @@
                         (llm-ask "Return ONLY this Aura form, nothing else: (lambda (x) (if (< x 0) (* -1 x) x))")
                         (catch (e) "")))
                     (set! *code* (try (extract-code *resp*) (catch (e) "")))
-                    ; string-find is not in std/string — scan for "(lambda"
-                    (set! *cut* -1)
-                    (set! *idx* 0)
-                    (if (string? *code*)
-                      (while
-                        (lambda ()
-                          (and (< *cut* 0)
-                               (<= (+ *idx* 7) (string-length *code*))))
-                        (lambda ()
-                          (if (string=? (substring *code* *idx* (+ *idx* 7)) "(lambda")
-                            (set! *cut* *idx*)
-                            (set! *idx* (+ *idx* 1)))))
-                      #f)
-                    (if (and (string? *code*) (>= *cut* 0))
+                    (set! *cut* (try (string-find *code* "(lambda") (catch (e) -1)))
+                    (if (and (string? *code*) (number? *cut*) (>= *cut* 0))
                       (set! *code* (substring *code* *cut* (string-length *code*)))
                       (set! *code* ""))
                     (if (and (string? *code*)
@@ -266,8 +253,7 @@
                 (if (= n 3) (set! *body* *poison*) #f)
 
                 (set! *snap* (try (ast:snapshot "r") (catch (e) -1)))
-                (set-car! *sc* (live-fit))
-                (set! *pre* (car *sc*))
+                (set! *pre* (live-fit))
                 (set! *loop-r*
                   (rebind-f *body* (string-append "strand-r" (number->string n))))
                 (set! *dec* 'rollback)
@@ -283,8 +269,7 @@
                         #f)
                       #f))
                   #f)
-                (set-cdr! *sc* (live-fit))
-                (set! *post* (cdr *sc*))
+                (set! *post* (live-fit))
                 (display "  propose ")
                 (display *body*)
                 (if (string=? *propose-mode* "llm")
@@ -319,7 +304,7 @@
                       (try (hot-strategy:heal!) (catch (e) #f))
                       (try (eval-current) (catch (e) #f))
                       (try (mutate:safe-yield) (catch (e) #f)))
-                    (if (or (not *okv*) (eq? *dec* 'rollback) (< (cdr *sc*) (car *sc*)))
+                    (if (or (not *okv*) (eq? *dec* 'rollback) (< *post* *pre*))
                       (begin
                         (set! *rollbacks* (+ *rollbacks* 1))
                         (set! *last-decision* "rollback")
